@@ -31,10 +31,11 @@ jobs:
         pytest -v
 
     - name: Security SAST & Zero-PHI Audit
+      env:
+        AUDIT_SECRET_KEY: ci-test-key-not-for-production
       run: |
         python -c "
         from agents.base import PHIGuard, AuditLogger
-        import pytest
         assert AuditLogger.verify_integrity() is True
         print('Security & Zero-PHI Audit Passed!')
         "

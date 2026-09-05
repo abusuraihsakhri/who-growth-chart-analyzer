@@ -1,7 +1,7 @@
 # WHO Growth Chart Analyzer
 
 > **Domain:** Clinical Decision Support & Biomedical Computing  
-> **Reference Guidelines & Standards:** `Standard Clinical Formulations & ISO/IEC Quality Frameworks`
+> **Standards:** Standard Clinical Formulations & ISO/IEC Quality Frameworks
 
 <div align="center">
 
@@ -16,97 +16,168 @@
 
 ---
 
-## 📖 What It Does
+## Overview
 
-WHO Growth Chart Analyzer
-WHO weight/height/head-circumference percentiles via LMS with stunting/wasting flags.
-Stdlib only.
+WHO Growth Chart Analyzer computes weight/height/head-circumference percentiles via LMS methodology with stunting/wasting flags. It also provides a multi-agent evaluation framework with HMAC-SHA256 tamper-evident audit trails and zero-PHI outbound protection.
 
 ---
 
-## ⚙️ Key Capabilities & Algorithmic Modules
+## Key Features
 
-### 🔬 Analytical Functions
+### Analytical Functions
+- **BMI-for-age calculation** — `calculate_bmi_z()` computes BMI from weight/height
+- **HbA1c conversion** — `convert_hba1c()` converts between HbA1c (%) and estimated average glucose (mg/dL)
+- **Generic scoring** — `calculate_score()` provides weighted-sum scoring for arbitrary inputs
 
-- **`calculate_score()`**: Generic formula stub: weighted sum of numeric inputs.
-- **`assess_row()`** — calculates and validates assess_row parameters.
-- **`process_csv()`** — calculates and validates process_csv parameters.
-- **`build_parser()`** — calculates and validates build_parser parameters.
-- **`main()`** — calculates and validates main parameters.
+### Enterprise Security
+- **Zero-PHI Outbound Guard** — AST and regex inspection blocking SSNs, MRNs, phone numbers, and patient identifiers
+- **HMAC-SHA256 Audit Trail** — Chained, cryptographically signed logs for every evaluation
+- **Multi-Agent Evaluation** — Specialized workers (QC, Safety, Protocol Conformance) for task assessment
+
+### REST API
+- **FastAPI Server** — OpenAPI 3.1 REST endpoints for audit, chat, and logs
+- **Prometheus Metrics** — Operational metrics at `/metrics`
 
 ---
 
-## 📐 Mathematical Formulation & Logic
+## Installation
 
-```text
-  """Generic formula stub: weighted sum of numeric inputs."""
-  score = sum(vals) * (0.9 + h*0.02) + math.log1p(len(vals))
-  return calculate_score(**row)
+```bash
+# Clone the repository
+git clone https://github.com/abusuraihsakhri/who-growth-chart-analyzer.git
+cd who-growth-chart-analyzer
+
+# Install dependencies
+pip install -e ".[dev]"
+
+# Set the required audit key (generate a secure random key)
+export AUDIT_SECRET_KEY=$(python -c "import secrets; print(secrets.token_hex(32))")
 ```
 
 ---
 
-## 💻 CLI Quickstart & Usage
+## Usage
 
-### 1. Guided Interactive Mode
+### CLI Commands
+
 ```bash
-python cli.py
+# Single task evaluation
+python cli.py audit --task-id TASK-01 --target SPECIMEN-01 --primary 28.5 --secondary 14.2
+
+# Chat with the supervisor
+python cli.py chat "Explain the evaluation"
+
+# Batch CSV processing
+python cli.py batch -i sample.csv -o results.csv
+
+# Verify audit trail integrity
+python cli.py verify-audit
+
+# Start the FastAPI server
+python cli.py serve --host 127.0.0.1 --port 8000
 ```
 
-### 2. Direct Parameterized Evaluation
-```bash
-python cli.py --task-id <value> --target <value> --primary <value> --secondary <value>
+### Direct Growth Chart Calculations
+
+```python
+from growth_chart import calculate_bmi_z, convert_hba1c
+
+# BMI calculation
+result = calculate_bmi_z(weight_kg=70, height_cm=175, age_months=60, sex="M")
+print(result)  # {'bmi': 22.86, 'weight_kg': 70.0, 'height_cm': 175.0}
+
+# HbA1c conversion
+result = convert_hba1c(hba1c_percent=6.5)
+print(result)  # {'hba1c_percent': 6.5, 'eag_mgdl': 140.0}
 ```
 
-### Parameter Reference
-- `--task-id`: Specifies input measurement or parameter value.
-- `--target`: Specifies input measurement or parameter value.
-- `--primary`: Specifies input measurement or parameter value.
-- `--secondary`: Specifies input measurement or parameter value.
-- `--critical`: Specifies input measurement or parameter value.
-- `--status`: Specifies input measurement or parameter value.
-- `--input`: Specifies input measurement or parameter value.
-- `--output`: Specifies input measurement or parameter value.
+### Batch CSV Processing
 
-### Input Data Schema
-
-| Field | Description | Requirement |
-|:------|:------------|:------------|
-| `id` | Parameter / observation metric | Required |
-| `value` | Parameter / observation metric | Required |
-| `qty` | Parameter / observation metric | Required |
+```bash
+python growth_chart.py batch --input sample.csv --output results.csv
+```
 
 ---
 
-## 🛡️ Security & Enterprise Architecture
+## API Endpoints
 
-* **Zero-PHI Outbound Interceptor:** Active AST and regex inspection blocking SSNs, MRNs, phone numbers, and patient identifiers.
-* **Tamper-Evident HMAC-SHA256 Audit Trail:** Chained, cryptographically signed logs for every evaluation and state transition.
-* **Air-Gapped LLM Reasoning Adapter:** Agnostic integration for local Ollama instances (`llama3`, `mistral`), Claude 3.5 Sonnet, GPT-4o, and deterministic test mocks.
-* **Active Learning Bayesian Calibration:** Dynamic tracker updating worker reliability weights and monitoring Brier calibration drift.
-* **FastAPI & Prometheus Telemetry:** Exposes OpenAPI 3.1 REST endpoints and operational Prometheus metrics (`/metrics`).
+| Endpoint | Method | Description |
+|:---------|:-------|:------------|
+| `/health` | GET | Health check |
+| `/metrics` | GET | Operational metrics |
+| `/api/audit` | POST | Submit task for multi-agent evaluation |
+| `/api/chat` | POST | Query the supervisory chat |
+| `/api/audit/logs` | GET | Retrieve and verify HMAC audit trail |
 
 ---
 
-## 🧪 Testing & Verification
+## Security
 
-Run the automated test suite:
+The application requires the `AUDIT_SECRET_KEY` environment variable. **Never commit this key.** Generate a fresh key for each deployment:
 
 ```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+The docker-compose setup reads from a `.env` file that you must create:
+
+```bash
+# .env
+AUDIT_SECRET_KEY=your-generated-key-here
+```
+
+---
+
+## Testing
+
+```bash
+# Run all tests
 pytest -v
-```
 
-Execute high-throughput batch simulation benchmarks:
-
-```bash
-python simulator.py --tasks 1000 --concurrency 8
+# Run simulation benchmark
+python simulator.py 1000
 ```
 
 ---
 
-## 🐳 Container Deployment
+## Docker Deployment
 
 ```bash
+# Build and run
 docker build -t who-growth-chart-analyzer .
-docker run -p 8000:8000 who-growth-chart-analyzer
+docker run -e AUDIT_SECRET_KEY=your-key -p 8000:8000 who-growth-chart-analyzer
+
+# Or use docker-compose
+echo "AUDIT_SECRET_KEY=$(python -c 'import secrets;print(secrets.token_hex(32)')" > .env
+docker-compose up
 ```
+
+---
+
+## Project Structure
+
+```
+who-growth-chart-analyzer/
+├── agents/              # Multi-agent evaluation framework
+│   ├── api.py           # FastAPI REST server
+│   ├── base.py          # Security, PHI guard, audit trail
+│   ├── models.py        # Pydantic data models
+│   ├── supervisor.py    # Master orchestrator
+│   ├── workers.py       # Specialized evaluation workers
+│   └── llm_factory.py   # LLM provider factory
+├── tests/               # Test suite
+├── growth_chart.py      # Core calculation engine
+├── cli.py               # Command-line interface
+├── simulator.py         # High-throughput simulation
+├── enrichment.py        # Feature enrichment modules
+├── web/index.html       # Operations dashboard
+├── Dockerfile
+├── docker-compose.yml
+└── pyproject.toml
+```
+
+---
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.

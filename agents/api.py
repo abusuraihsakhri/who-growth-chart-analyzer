@@ -1,6 +1,7 @@
 """
 FastAPI REST API Server for Who Growth Chart Analyzer.
 """
+import os
 from typing import Dict, Any, List
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -8,7 +9,15 @@ from .base import AuditLogger, PHIGuard
 from .models import SystemTaskPayload, ConsensusDossier
 from .supervisor import SystemSupervisor
 
-supervisor = SystemSupervisor(model_provider="mock")
+_supervisor = None
+
+
+def _get_supervisor():
+    global _supervisor
+    if _supervisor is None:
+        _supervisor = SystemSupervisor(model_provider=os.getenv("MODEL_PROVIDER", "mock"))
+    return _supervisor
+
 
 app = FastAPI(
     title="Who Growth Chart Analyzer API",
@@ -29,7 +38,7 @@ def health():
 @app.get("/metrics")
 def metrics():
     return {
-        "dossiers_processed_total": len(supervisor.dossier_registry),
+        "dossiers_processed_total": len(_get_supervisor().dossier_registry),
         "audit_blocks_total": len(AuditLogger.get_trail()),
         "system_status": "NOMINAL_OPTIMAL"
     }
@@ -37,14 +46,14 @@ def metrics():
 
 @app.post("/api/audit")
 def api_audit(payload: SystemTaskPayload):
-    dossier = supervisor.process_task(payload)
+    dossier = _get_supervisor().process_task(payload)
     return dossier.to_dict()
 
 
 @app.post("/api/chat")
 def api_chat(req: ChatRequest):
     try:
-        ans = supervisor.query_supervisory_chat(req.query)
+        ans = _get_supervisor().query_supervisory_chat(req.query)
         return {"response": ans}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

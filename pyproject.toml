@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "who-growth-chart-analyzer"
+version = "3.0.0"
+description = "WHO weight/height/head-circumference percentiles via LMS with stunting/wasting flags."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Dr. Abu Suraih Sakhri"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Healthcare Industry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dependencies = [
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+who-growth-chart-analyzer = "cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agents*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "."]
+python_files = ["test_*.py"]

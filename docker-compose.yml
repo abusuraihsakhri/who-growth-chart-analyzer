@@ -7,8 +7,10 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - AUDIT_SECRET_KEY=who-growth-chart-analyzer-prod-audit-key-2026
+      - AUDIT_SECRET_KEY=${AUDIT_SECRET_KEY:?AUDIT_SECRET_KEY must be set in .env file or environment}
       - MODEL_PROVIDER=mock
+    env_file:
+      - .env
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
