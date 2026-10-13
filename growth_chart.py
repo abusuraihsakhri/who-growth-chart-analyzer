@@ -1,153 +1,301 @@
 #!/usr/bin/env python3
+"""WHO 2006 growth standards: age-based LMS calculations, 0–60 months.
+
+Uses sex-specific WHO reference parameters. This is not a diagnostic tool.
+Weight-for-length/height (wasting) is not available in this dataset.
 """
-WHO Growth Chart Analyzer
-WHO weight/height/head-circumference percentiles via LMS with stunting/wasting flags.
-Stdlib only.
-"""
-import argparse, csv, os, sys, math
+import argparse
+import csv
+import json
+import math
+import os
+import sys
+from functools import lru_cache
+from importlib.resources import files
+from pathlib import Path
 
-MAX_CSV_FILE_SIZE = 50 * 1024 * 1024  # 50 MB safety limit
+MAX_CSV_FILE_SIZE = 50 * 1024 * 1024
+GENESIS = "WHO Child Growth Standards 2006"
 
 
-def _validate_safe_path(path: str) -> str:
-    """Validate a file path for basic safety: reject traversal attempts."""
-    # Reject null bytes
+def _validate_safe_path(path):
+    """Block explicit traversal and null bytes while allowing absolute local paths."""
+    path = os.fspath(path)
     if "\x00" in path:
         raise ValueError("Path contains null bytes")
-    # Resolve to absolute and ensure it doesn't escape via traversal
-    resolved = os.path.abspath(path)
-    # Reject obvious traversal patterns
-    normalized = os.path.normpath(path)
-    if ".." in normalized.split(os.sep):
-        raise ValueError(f"Path traversal detected in: {path}")
-    return resolved
+    if ".." in Path(path).parts:
+        raise ValueError("Path traversal detected")
+    return os.path.abspath(path)
+
+
+@lru_cache(maxsize=1)
+def _reference_rows():
+    with files("agents").joinpath("data/who_lms.json").open("r", encoding="utf-8") as stream:
+        reference = json.load(stream)
+    return reference["rows"]
+
+
+def _number(value, name):
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be numeric") from exc
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result
+
+
+def _lms(age, sex, indicator):
+    # WHO uses separate recumbent-length and standing-height standards at 24 months.
+    if age < 24:
+        points = [r for r in _reference_rows()
+                  if r["age_months"] < 24 or
+                  (r["age_months"] == 24 and r["stage"] == "length")]
+    else:
+        points = [r for r in _reference_rows()
+                  if r["age_months"] > 24 or
+                  (r["age_months"] == 24 and r["stage"] == "height")]
+    for index, right in enumerate(points):
+        if right["age_months"] >= age - 1e-8:
+            if index == 0 or abs(right["age_months"] - age) < 1e-8:
+                return right[sex][indicator]
+            left = points[index - 1]
+            fraction = (age - left["age_months"]) / (right["age_months"] - left["age_months"])
+            return [a + fraction * (b - a) for a, b in
+                    zip(left[sex][indicator], right[sex][indicator])]
+    return points[-1][sex][indicator]
+
+
+def lms_zscore(measurement, L, M, S):
+    """Apply the LMS Box–Cox transform, including its L=0 limit."""
+    measurement = _number(measurement, "measurement")
+    if measurement <= 0 or M <= 0 or S <= 0:
+        raise ValueError("measurement, M and S must be positive")
+    ratio_log = math.log(measurement / M)
+    return ratio_log / S if abs(L) < 1e-10 else math.expm1(L * ratio_log) / (L * S)
+
+
+def z_to_percentile(z):
+    return 50.0 * math.erfc(-z / math.sqrt(2))
+
+
+def analyze_growth(weight_kg, height_cm, age_months, sex="M",
+                   head_cm=None, measurement="auto"):
+    """Analyze age-based WHO indicators. Age is expressed in decimal months.
+
+    `measurement` is 'length', 'height' or 'auto' (age-appropriate assumption).
+    A 0.7-cm adjustment is applied for non-age-appropriate measurement positions.
+    """
+    age = _number(age_months, "age_months")
+    weight = _number(weight_kg, "weight_kg")
+    height = _number(height_cm, "height_cm")
+    sex = str(sex).upper()
+    measurement = str(measurement).lower()
+    if not 0 <= age <= 60:
+        raise ValueError("WHO 2006 reference supports ages 0 to 60 months only")
+    if sex not in ("M", "F"):
+        raise ValueError("sex must be M or F")
+    if measurement not in ("auto", "length", "height"):
+        raise ValueError("measurement must be auto, length or height")
+    if weight <= 0 or height <= 0:
+        raise ValueError("weight_kg and height_cm must be positive")
+    if head_cm is not None:
+        head_cm = _number(head_cm, "head_cm")
+        if head_cm <= 0:
+            raise ValueError("head_cm must be positive")
+
+    expected = "length" if age < 24 else "height"
+    actual = expected if measurement == "auto" else measurement
+    adjustment = 0.7 if expected == "length" and actual == "height" else (
+        -0.7 if expected == "height" and actual == "length" else 0.0)
+    reference_height = height + adjustment
+    if reference_height <= 0:
+        raise ValueError("adjusted height must be positive")
+    bmi = weight / (reference_height / 100.0) ** 2
+    inputs = {"weight": weight, "height": reference_height, "bmi": bmi}
+    if head_cm is not None:
+        inputs["head"] = head_cm
+
+    calculated = {}
+    for name, value in inputs.items():
+        z = lms_zscore(value, *_lms(age, sex, name))
+        calculated[name] = {
+            "z": round(z, 4),
+            "percentile": round(z_to_percentile(z), 4),
+        }
+
+    return {
+        "reference": GENESIS,
+        "age_months": age,
+        "sex": sex,
+        "measurement": actual,
+        "height_adjustment_cm": adjustment,
+        "height_for_reference_cm": round(reference_height, 3),
+        "height_cm": height,
+        "weight_kg": weight,
+        "bmi": round(bmi, 2),
+        "weight_for_age": calculated["weight"],
+        "height_for_age": calculated["height"],
+        "bmi_for_age": calculated["bmi"],
+        "head_for_age": calculated.get("head"),
+        "flags": {
+            "underweight": calculated["weight"]["z"] < -2,
+            "stunting_threshold": calculated["height"]["z"] < -2,
+            "low_bmi_for_age": calculated["bmi"]["z"] < -2,
+            "high_bmi_for_age": calculated["bmi"]["z"] > 2,
+        },
+        "note": "Age-based LMS only; no weight-for-length/height wasting assessment. "
+                "WHO Anthro age-in-days and extreme-z methods may differ; review "
+                "implausible anthropometry before clinical use.",
+    }
+
+
+def calculate_bmi_z(weight_kg, height_cm, age_months, sex="M"):
+    """Backward-compatible interface returning BMI and WHO age-based indicators."""
+    try:
+        return analyze_growth(weight_kg, height_cm, age_months, sex)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+
+def convert_hba1c(hba1c_percent=None, eag_mgdl=None):
+    """Unrelated legacy conversion retained for backward compatibility."""
+    try:
+        if hba1c_percent is not None:
+            h = _number(hba1c_percent, "hba1c_percent")
+            if h < 0:
+                raise ValueError("hba1c_percent cannot be negative")
+            return {"hba1c_percent": round(h, 1), "eag_mgdl": round(28.7 * h - 46.7, 1)}
+        if eag_mgdl is not None:
+            e = _number(eag_mgdl, "eag_mgdl")
+            if e < 0:
+                raise ValueError("eag_mgdl cannot be negative")
+            return {"hba1c_percent": round((e + 46.7) / 28.7, 1), "eag_mgdl": round(e, 1)}
+        return {"error": "Either hba1c_percent or eag_mgdl required"}
+    except ValueError as exc:
+        return {"error": str(exc)}
 
 
 def calculate_score(**kwargs):
-    """Generic formula stub: weighted sum of numeric inputs."""
-    vals = [float(v) for v in kwargs.values() if isinstance(v,(int,float)) or (isinstance(v,str) and v.replace('.','',1).replace('-','',1).isdigit())]
+    """Legacy generic weighted score (NOT a medical or growth score)."""
+    vals = []
+    for value in kwargs.values():
+        try:
+            if value is not None and str(value).strip():
+                vals.append(_number(value, "value"))
+        except ValueError:
+            pass
     if not vals:
-        vals = [float(kwargs.get("value", 1))]
-    # distinct per-project via slug hash
+        vals = [1.0]
     h = sum(ord(c) for c in "who-growth-chart-analyzer") % 10
-    score = sum(vals) * (0.9 + h*0.02) + math.log1p(len(vals))
-    return {"score": round(score,2), "inputs": len(vals)}
+    return {"score": round(sum(vals) * (0.9 + h * 0.02) + math.log1p(len(vals)), 2),
+            "inputs": len(vals)}
 
 
 def assess_row(row):
     try:
-        # Route to the appropriate calculator based on row keys present
         if "weight_kg" in row:
-            return calculate_bmi_z(row.get("weight_kg"), row.get("height_cm"), row.get("age_months") or row.get("age") or 60, row.get("sex","M"))
+            return analyze_growth(
+                row.get("weight_kg"), row.get("height_cm"),
+                row.get("age_months", row.get("age")),
+                row.get("sex", "M"), row.get("head_cm") or None,
+                row.get("measurement") or "auto")
         if "hba1c_percent" in row or "eag_mgdl" in row:
             return convert_hba1c(row.get("hba1c_percent"), row.get("eag_mgdl"))
-        # Fallback: generic score
         return calculate_score(**row)
-    except Exception as e:
-        return {"error": str(e)}
+    except (ValueError, TypeError) as exc:
+        return {"error": str(exc)}
 
 
-def calculate_bmi_z(weight_kg, height_cm, age_months, sex="M"):
-    """Calculate BMI-for-age z-score approximation."""
+def _csv_safe(value):
+    if isinstance(value, (dict, list)):
+        value = json.dumps(value, sort_keys=True)
+    cell = str(value) if value is not None else ""
+    if cell.startswith(("=", "+", "@", "\t", "\r")) or (
+            cell.startswith("-") and not _looks_numeric(cell)):
+        return "'" + cell
+    return cell
+
+
+def _looks_numeric(text):
     try:
-        w = float(weight_kg)
-        h = float(height_cm) / 100.0  # convert to meters
-        if h <= 0 or w <= 0:
-            return {"error": "Weight and height must be positive"}
-        bmi = w / (h * h)
-        return {"bmi": round(bmi, 2), "weight_kg": w, "height_cm": float(height_cm)}
-    except (ValueError, TypeError) as e:
-        return {"error": f"Invalid input: {e}"}
-
-
-def convert_hba1c(hba1c_percent, eag_mgdl):
-    """Convert between HbA1c (%) and estimated average glucose (mg/dL)."""
-    try:
-        if hba1c_percent is not None:
-            h = float(hba1c_percent)
-            eag = 28.7 * h - 46.7
-            return {"hba1c_percent": round(h, 1), "eag_mgdl": round(eag, 1)}
-        if eag_mgdl is not None:
-            e = float(eag_mgdl)
-            h = (e + 46.7) / 28.7
-            return {"hba1c_percent": round(h, 1), "eag_mgdl": round(e, 1)}
-        return {"error": "Either hba1c_percent or eag_mgdl required"}
-    except (ValueError, TypeError) as e:
-        return {"error": f"Invalid input: {e}"}
+        return math.isfinite(float(text))
+    except ValueError:
+        return False
 
 
 def process_csv(inp, out):
-    # Validate input path for safety
-    safe_inp = _validate_safe_path(inp)
-    safe_out = _validate_safe_path(out)
-
-    # Check file size before processing
-    file_size = os.path.getsize(safe_inp)
-    if file_size > MAX_CSV_FILE_SIZE:
-        raise ValueError(f"Input file exceeds maximum size of {MAX_CSV_FILE_SIZE} bytes")
-
+    safe_inp, safe_out = _validate_safe_path(inp), _validate_safe_path(out)
+    if os.path.realpath(safe_inp) == os.path.realpath(safe_out):
+        raise ValueError("Input and output CSV paths must differ")
+    if os.path.getsize(safe_inp) > MAX_CSV_FILE_SIZE:
+        raise ValueError("Input CSV exceeds 50 MB")
     with open(safe_inp, newline="", encoding="utf-8-sig") as f:
-        r = csv.DictReader(f)
-        if r.fieldnames is None:
-            raise ValueError("CSV file is empty or has no header row")
-        rows = list(r)
-        fieldnames = r.fieldnames
+        reader = csv.DictReader(f)
+        fields = reader.fieldnames
+        if not fields or any(not x for x in fields) or len(set(fields)) != len(fields):
+            raise ValueError("CSV requires unique, nonempty header names")
+        rows = list(reader)
     results = []
+    keys = list(fields)
     for row in rows:
-        res = assess_row(row)
-        merged = {**row, **{k: str(v) for k, v in res.items()}}
+        result = assess_row(row)
+        merged = {**row, **result}
         results.append(merged)
-    # union fieldnames
-    all_keys = set()
-    for rr in results:
-        all_keys.update(rr.keys())
-    # keep original first
-    extra = [k for k in all_keys if k not in fieldnames]
+        for k in merged:
+            if k not in keys:
+                keys.append(k)
     with open(safe_out, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=list(fieldnames) + extra)
-        w.writeheader()
-        w.writerows(results)
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+        for result in results:
+            writer.writerow({k: _csv_safe(v) for k, v in result.items()})
     return results
 
-def build_parser():
-    p=argparse.ArgumentParser(prog="growth_chart", description="WHO Growth Chart Analyzer")
-    sub=p.add_subparsers(dest="cmd", required=True)
-    s=sub.add_parser("single", help="single calculation")
-    s.add_argument("--json", help='JSON of inputs e.g. bil')
-    s.add_argument("--bili", type=float); s.add_argument("--creat", type=float); s.add_argument("--inr", type=float); s.add_argument("--na", type=float)
-    s.add_argument("--qt", type=float); s.add_argument("--rr", type=float); s.add_argument("--hr", type=float)
-    b=sub.add_parser("batch", help="batch csv"); b.add_argument("--input", required=True); b.add_argument("--output", required=True)
-    return p
 
 def main(argv=None):
-    import json as _json
-    p = build_parser()
-    a = p.parse_args(argv)
-    if a.cmd == "single":
-        if a.json:
-            row = _json.loads(a.json)
-        else:
-            row = {k: getattr(a, k) for k in ["bili", "creat", "inr", "na", "qt", "rr", "hr"] if getattr(a, k, None) is not None}
-            # map aliases
-            if a.bili is not None: row["bilirubin"] = a.bili
-            if a.creat is not None: row["creatinine"] = a.creat
-            if a.inr is not None: row["inr"] = a.inr
-            if a.na is not None: row["sodium"] = a.na
-            if a.qt is not None: row["qt_ms"] = a.qt
-            if a.rr is not None: row["rr_ms"] = a.rr
-            if a.hr is not None: row["hr_bpm"] = a.hr
-        print(assess_row(row))
-        return 0
-    if a.cmd == "batch":
+    parser = argparse.ArgumentParser(description="WHO 2006 growth indicators (0–60 months)")
+    sub = parser.add_subparsers(dest="command", required=True)
+    single = sub.add_parser("single")
+    single.add_argument("--json", help="JSON object with growth measurements")
+    single.add_argument("--weight-kg", type=float)
+    single.add_argument("--height-cm", type=float)
+    single.add_argument("--age-months", type=float)
+    single.add_argument("--head-cm", type=float)
+    single.add_argument("--sex", default="M", choices=["M", "F"])
+    single.add_argument("--measurement", default="auto", choices=["auto", "length", "height"])
+    for legacy in ("bili", "creat", "inr", "na", "qt", "rr", "hr"):
+        single.add_argument("--" + legacy, type=float, help=argparse.SUPPRESS)
+    batch = sub.add_parser("batch")
+    batch.add_argument("--input", required=True)
+    batch.add_argument("--output", required=True)
+    a = parser.parse_args(argv)
+    if a.command == "batch":
         try:
-            res = process_csv(a.input, a.output)
-            print(f"Processed {len(res)} -> {a.output}")
+            print(f"Processed {len(process_csv(a.input, a.output))} rows to {a.output}")
             return 0
-        except (ValueError, FileNotFoundError, PermissionError) as e:
-            print(f"Error: {e}", file=sys.stderr)
+        except (ValueError, OSError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
             return 1
-    p.print_help()
-    return 1
+    try:
+        if a.json:
+            row = json.loads(a.json)
+            if not isinstance(row, dict):
+                raise ValueError("--json must be a JSON object")
+        elif a.weight_kg is not None:
+            row = dict(weight_kg=a.weight_kg, height_cm=a.height_cm,
+                       age_months=a.age_months, head_cm=a.head_cm,
+                       sex=a.sex, measurement=a.measurement)
+        else:
+            row = {k: getattr(a, k) for k in ("bili", "creat", "inr", "na", "qt", "rr", "hr")
+                   if getattr(a, k) is not None}
+        result = assess_row(row)
+        print(json.dumps(result, indent=2))
+        return 1 if "error" in result else 0
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
-if __name__=="__main__":
-    import sys; sys.exit(main())
+
+if __name__ == "__main__":
+    sys.exit(main())
