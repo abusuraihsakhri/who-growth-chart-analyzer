@@ -1,15 +1,19 @@
-"""
-FastAPI REST API Server for Who Growth Chart Analyzer.
-"""
+"""FastAPI interface for growth measurements and legacy audit demo."""
 import os
-from typing import Dict, Any, List
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from .base import AuditLogger, PHIGuard
-from .models import SystemTaskPayload, ConsensusDossier
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field
+
+from growth_chart import analyze_growth
+from .base import AuditLogger, PHIGuard, SecurityException
+from .models import SystemTaskPayload
 from .supervisor import SystemSupervisor
 
 _supervisor = None
+WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 
 
 def _get_supervisor():
@@ -19,46 +23,66 @@ def _get_supervisor():
     return _supervisor
 
 
-app = FastAPI(
-    title="Who Growth Chart Analyzer API",
-    description="Enterprise Distributed Component Platform (Clinical & Biomedical AI)",
-    version="3.0.0-ENTERPRISE",
-)
+app = FastAPI(title="WHO Growth Chart Analyzer", version="3.1.0",
+              description="WHO 2006 age-based indicators; separate non-clinical audit demonstration")
+
+
+class GrowthRequest(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+    age_months: float = Field(ge=0, le=60)
+    sex: str = Field(pattern="^[MmFf]$")
+    weight_kg: float = Field(gt=0, le=500)
+    height_cm: float = Field(gt=0, le=250)
+    head_cm: float | None = Field(default=None, gt=0, le=100)
+    measurement: str = Field(default="auto", pattern="^(auto|length|height)$")
 
 
 class ChatRequest(BaseModel):
-    query: str
+    query: str = Field(min_length=1, max_length=4000)
 
 
 @app.get("/health")
 def health():
-    return {"status": "HEALTHY", "service": "who-growth-chart-analyzer", "domain": "Clinical & Biomedical AI", "standard": "CAP / CLSI / ISO Standards", "version": "3.0.0-ENTERPRISE"}
+    return {"status": "ok", "service": "who-growth-chart-analyzer", "version": "3.1.0"}
 
 
 @app.get("/metrics")
 def metrics():
-    return {
-        "dossiers_processed_total": len(_get_supervisor().dossier_registry),
-        "audit_blocks_total": len(AuditLogger.get_trail()),
-        "system_status": "NOMINAL_OPTIMAL"
-    }
+    return {"dossiers_processed_total": len(_get_supervisor().dossier_registry),
+            "audit_blocks_total": len(AuditLogger.get_trail()),
+            "audit_integrity_verified": AuditLogger.verify_integrity()}
+
+
+@app.post("/api/growth")
+def api_growth(payload: GrowthRequest):
+    try:
+        return analyze_growth(**payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/api/audit")
 def api_audit(payload: SystemTaskPayload):
-    dossier = _get_supervisor().process_task(payload)
-    return dossier.to_dict()
+    try:
+        return _get_supervisor().process_task(payload).to_dict()
+    except SecurityException as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/chat")
 def api_chat(req: ChatRequest):
     try:
-        ans = _get_supervisor().query_supervisory_chat(req.query)
-        return {"response": ans}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        return {"response": _get_supervisor().query_supervisory_chat(req.query)}
+    except (SecurityException, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/audit/logs")
 def api_audit_logs():
-    return {"audit_trail": AuditLogger.get_trail(), "verified": AuditLogger.verify_integrity()}
+    return {"audit_trail": AuditLogger.get_trail(),
+            "verified": AuditLogger.verify_integrity()}
+
+
+# Served last so API routes retain priority. The static dashboard works
+# independently on GitHub Pages, with no backend and no PHI transmission.
+app.mount("/", StaticFiles(directory=str(WEB_ROOT), html=True), name="static")
